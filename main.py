@@ -358,24 +358,142 @@ async def create_ticket(interaction: discord.Interaction, subject: str, descript
     user_id = str(interaction.user.id)
     ticket_id = str(len(data['tickets']) + 1)
     
-    data['tickets'][ticket_id] = {
-        'user_id': user_id,
-        'subject': subject,
-        'description': description,
-        'status': 'open',
-        'created_at': datetime.now().isoformat(),
-        'guild_id': str(interaction.guild.id)
+    # Create ticket channel
+    guild = interaction.guild
+    category = discord.utils.get(guild.categories, name="🎫 チケット")
+    
+    # Create category if it doesn't exist
+    if not category:
+        category = await guild.create_category("🎫 チケット")
+    
+    # Set permissions for the ticket channel
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.owner: discord.PermissionOverwrite(read_messages=True, send_messages=True)
     }
     
-    save_data(data)
+    # Add permissions for users with Administrator permission
+    for member in guild.members:
+        if member.guild_permissions.administrator:
+            overwrites[member] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
     
-    embed = discord.Embed(
-        title=f'🎫 チケット #{ticket_id} 作成完了',
-        description=f'件名: {subject}\n説明: {description}\nステータス: オープン',
-        color=0xff9900
-    )
+    # Create the ticket channel
+    channel_name = f"ticket-{ticket_id}-{interaction.user.name}"
+    try:
+        ticket_channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites
+        )
+        
+        data['tickets'][ticket_id] = {
+            'user_id': user_id,
+            'subject': subject,
+            'description': description,
+            'status': 'open',
+            'created_at': datetime.now().isoformat(),
+            'guild_id': str(interaction.guild.id),
+            'channel_id': str(ticket_channel.id)
+        }
+        
+        save_data(data)
+        
+        # Send initial message to ticket channel
+        embed = discord.Embed(
+            title=f'🎫 チケット #{ticket_id}',
+            description=f'**件名:** {subject}\n**説明:** {description or "なし"}\n**作成者:** {interaction.user.mention}',
+            color=0xff9900
+        )
+        embed.add_field(name='ステータス', value='🟢 オープン', inline=True)
+        embed.add_field(name='作成日時', value=f'<t:{int(datetime.now().timestamp())}:F>', inline=True)
+        
+        # Add close button
+        view = TicketView(ticket_id)
+        await ticket_channel.send(embed=embed, view=view)
+        
+        # Response to user
+        await interaction.response.send_message(
+            f'✅ チケット #{ticket_id} を作成しました！\n'
+            f'専用チャンネル: {ticket_channel.mention}',
+            ephemeral=True
+        )
+        
+    except Exception as e:
+        await interaction.response.send_message(f'❌ チケットチャンネルの作成に失敗しました: {str(e)}', ephemeral=True)
+
+# Ticket View with close button
+class TicketView(discord.ui.View):
+    def __init__(self, ticket_id):
+        super().__init__(timeout=None)
+        self.ticket_id = ticket_id
     
-    await interaction.response.send_message(embed=embed)
+    @discord.ui.button(label='チケットを閉じる', style=discord.ButtonStyle.danger, emoji='🔒')
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        
+        if self.ticket_id not in data['tickets']:
+            await interaction.response.send_message('❌ チケットが見つかりません。', ephemeral=True)
+            return
+        
+        ticket = data['tickets'][self.ticket_id]
+        user_id = str(interaction.user.id)
+        
+        # Check if user can close the ticket (creator or admin)
+        if user_id != ticket['user_id'] and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message('❌ このチケットを閉じる権限がありません。', ephemeral=True)
+            return
+        
+        # Update ticket status
+        data['tickets'][self.ticket_id]['status'] = 'closed'
+        data['tickets'][self.ticket_id]['closed_at'] = datetime.now().isoformat()
+        data['tickets'][self.ticket_id]['closed_by'] = user_id
+        save_data(data)
+        
+        # Update embed
+        embed = discord.Embed(
+            title=f'🎫 チケット #{self.ticket_id} (クローズ済み)',
+            description=f'**件名:** {ticket["subject"]}\n**説明:** {ticket.get("description", "なし")}\n**作成者:** <@{ticket["user_id"]}>',
+            color=0x808080
+        )
+        embed.add_field(name='ステータス', value='🔴 クローズ済み', inline=True)
+        embed.add_field(name='クローズ日時', value=f'<t:{int(datetime.now().timestamp())}:F>', inline=True)
+        embed.add_field(name='クローズ実行者', value=interaction.user.mention, inline=True)
+        
+        # Disable button
+        button.disabled = True
+        
+        await interaction.response.edit_message(embed=embed, view=self)
+        
+        # Send confirmation message
+        await interaction.followup.send('🔒 チケットがクローズされました。')
+
+# List tickets command
+@bot.tree.command(name='tickets', description='チケット一覧を表示')
+async def list_tickets(interaction: discord.Interaction):
+    data = load_data()
+    guild_id = str(interaction.guild.id)
+    
+    guild_tickets = {k: v for k, v in data['tickets'].items() if v['guild_id'] == guild_id}
+    
+    if not guild_tickets:
+        await interaction.response.send_message('チケットがありません。', ephemeral=True)
+        return
+    
+    embed = discord.Embed(title='🎫 チケット一覧', color=0x0099ff)
+    
+    for ticket_id, ticket in guild_tickets.items():
+        status_emoji = '🟢' if ticket['status'] == 'open' else '🔴'
+        creator = interaction.guild.get_member(int(ticket['user_id']))
+        creator_name = creator.display_name if creator else 'Unknown User'
+        
+        embed.add_field(
+            name=f"{status_emoji} チケット #{ticket_id}",
+            value=f"**件名:** {ticket['subject']}\n**作成者:** {creator_name}\n**ステータス:** {ticket['status']}",
+            inline=True
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Nuke channel
 @bot.tree.command(name='nuke', description='チャンネルを再生成（設定を引き継ぎ）')
@@ -437,6 +555,127 @@ async def view_profile(interaction: discord.Interaction, user: discord.Member = 
     
     await interaction.response.send_message(embed=embed)
 
+# Public Ticket Creation View
+class PublicTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label='🎫 チケットを作成', style=discord.ButtonStyle.primary, emoji='🎫')
+    async def create_ticket_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Show modal for ticket creation
+        modal = TicketModal()
+        await interaction.response.send_modal(modal)
+
+# Ticket Creation Modal
+class TicketModal(discord.ui.Modal, title='🎫 チケット作成'):
+    def __init__(self):
+        super().__init__()
+    
+    subject = discord.ui.TextInput(
+        label='件名',
+        placeholder='チケットの件名を入力してください...',
+        required=True,
+        max_length=100
+    )
+    
+    description = discord.ui.TextInput(
+        label='説明',
+        placeholder='問題の詳細を入力してください...',
+        style=discord.TextStyle.long,
+        required=False,
+        max_length=1000
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        data = load_data()
+        user_id = str(interaction.user.id)
+        ticket_id = str(len(data['tickets']) + 1)
+        
+        # Create ticket channel
+        guild = interaction.guild
+        category = discord.utils.get(guild.categories, name="🎫 チケット")
+        
+        # Create category if it doesn't exist
+        if not category:
+            category = await guild.create_category("🎫 チケット")
+        
+        # Set permissions for the ticket channel
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.owner: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        
+        # Add permissions for users with Administrator permission
+        for member in guild.members:
+            if member.guild_permissions.administrator:
+                overwrites[member] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        
+        # Create the ticket channel
+        channel_name = f"ticket-{ticket_id}-{interaction.user.name}"
+        try:
+            ticket_channel = await guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites
+            )
+            
+            data['tickets'][ticket_id] = {
+                'user_id': user_id,
+                'subject': str(self.subject.value),
+                'description': str(self.description.value) if self.description.value else "",
+                'status': 'open',
+                'created_at': datetime.now().isoformat(),
+                'guild_id': str(interaction.guild.id),
+                'channel_id': str(ticket_channel.id)
+            }
+            
+            save_data(data)
+            
+            # Send initial message to ticket channel
+            embed = discord.Embed(
+                title=f'🎫 チケット #{ticket_id}',
+                description=f'**件名:** {self.subject.value}\n**説明:** {self.description.value or "なし"}\n**作成者:** {interaction.user.mention}',
+                color=0xff9900
+            )
+            embed.add_field(name='ステータス', value='🟢 オープン', inline=True)
+            embed.add_field(name='作成日時', value=f'<t:{int(datetime.now().timestamp())}:F>', inline=True)
+            
+            # Add close button
+            view = TicketView(ticket_id)
+            await ticket_channel.send(embed=embed, view=view)
+            
+            # Response to user
+            await interaction.response.send_message(
+                f'✅ チケット #{ticket_id} を作成しました！\n'
+                f'専用チャンネル: {ticket_channel.mention}',
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            await interaction.response.send_message(f'❌ チケットチャンネルの作成に失敗しました: {str(e)}', ephemeral=True)
+
+# Ticket panel command
+@bot.tree.command(name='ticket-panel', description='チケット作成パネルを設置')
+async def ticket_panel(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message('❌ チャンネル管理権限が必要です。', ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title='🎫 サポートチケット',
+        description='何かお困りのことがありましたら、下のボタンをクリックしてサポートチケットを作成してください。\n\n'
+                   '**チケットについて:**\n'
+                   '• 専用のプライベートチャンネルが作成されます\n'
+                   '• あなたとサーバーの管理者のみがアクセス可能です\n'
+                   '• 問題が解決したらチケットをクローズしてください',
+        color=0x00ff99
+    )
+    embed.set_footer(text='24時間365日サポート対応')
+    
+    view = PublicTicketView()
+    await interaction.response.send_message(embed=embed, view=view)
+
 # Help system
 COMMAND_HELP = {
     'auth': {
@@ -487,7 +726,12 @@ COMMAND_HELP = {
     'ticket': {
         'description': 'サポートチケットを作成',
         'usage': '/ticket <件名> [説明]',
-        'details': 'サポートチケットを作成します。問題や要望がある場合に使用してください。'
+        'details': 'サポートチケットを作成し、専用のプライベートチャンネルを生成します。オーナーと管理者のみがアクセス可能です。'
+    },
+    'tickets': {
+        'description': 'チケット一覧を表示',
+        'usage': '/tickets',
+        'details': 'サーバー内の全チケットの一覧を表示します。管理者用コマンドです。'
     },
     'nuke': {
         'description': 'チャンネルを再生成（設定を引き継ぎ）',
@@ -503,6 +747,11 @@ COMMAND_HELP = {
         'description': 'ヘルプを表示',
         'usage': '/help [コマンド名]',
         'details': 'コマンド一覧を表示します。コマンド名を指定すると詳細な説明を表示します。'
+    },
+    'ticket-panel': {
+        'description': 'チケット作成パネルを設置',
+        'usage': '/ticket-panel',
+        'details': '誰でもボタンをクリックしてチケットを作成できるパネルを設置します。チャンネル管理権限が必要です。'
     }
 }
 
