@@ -25,8 +25,6 @@ def run_flask():
 
 # Bot setup
 intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 
 # Data storage files
@@ -56,34 +54,208 @@ async def on_ready():
     except Exception as e:
         print(f'Failed to sync commands: {e}')
 
-# Authentication command
-@bot.tree.command(name='auth', description='認証してロールを取得')
-async def auth(interaction: discord.Interaction):
-    data = load_data()
-    user_id = str(interaction.user.id)
-    
-    # Add user to database if not exists
-    if user_id not in data['users']:
-        data['users'][user_id] = {
-            'coins': 100,
-            'authenticated': True,
-            'join_date': datetime.now().isoformat()
-        }
-    else:
-        data['users'][user_id]['authenticated'] = True
-    
-    save_data(data)
-    
-    # Try to add role (you'll need to create a role named "認証済み" in your server)
-    try:
-        role = discord.utils.get(interaction.guild.roles, name="認証済み")
-        if role:
+# Role Selection View
+class RoleSelectionView(discord.ui.View):
+    def __init__(self, available_roles):
+        super().__init__(timeout=300)
+        self.available_roles = available_roles
+        self.setup_buttons()
+
+    def setup_buttons(self):
+        # Create buttons for each role (max 25 buttons)
+        for i, role in enumerate(self.available_roles[:25]):
+            button = discord.ui.Button(
+                label=role.name,
+                style=discord.ButtonStyle.primary,
+                custom_id=f"role_{role.id}",
+                emoji="🎭"
+            )
+            button.callback = self.create_role_callback(role)
+            self.add_item(button)
+
+    def create_role_callback(self, role):
+        async def role_callback(interaction):
+            await self.assign_role(interaction, role)
+        return role_callback
+
+    async def assign_role(self, interaction, role):
+        try:
+            # Check if user already has the role
+            if role in interaction.user.roles:
+                await interaction.response.send_message(f'❌ あなたは既に {role.name} ロールを持っています。', ephemeral=True)
+                return
+
+            # Add the role to the user
             await interaction.user.add_roles(role)
-            await interaction.response.send_message('✅ 認証が完了しました！ロールが付与されました。', ephemeral=True)
+            
+            # Update user data
+            data = load_data()
+            user_id = str(interaction.user.id)
+            
+            if user_id not in data['users']:
+                data['users'][user_id] = {
+                    'coins': 100,
+                    'authenticated': True,
+                    'join_date': datetime.now().isoformat()
+                }
+            else:
+                data['users'][user_id]['authenticated'] = True
+            
+            save_data(data)
+
+            await interaction.response.send_message(f'✅ {role.name} ロールが付与されました！', ephemeral=True)
+            
+        except discord.Forbidden:
+            await interaction.response.send_message('❌ ロールを付与する権限がありません。', ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f'❌ ロールの付与に失敗しました: {str(e)}', ephemeral=True)
+
+# Specific Role View for single role assignment
+class SpecificRoleView(discord.ui.View):
+    def __init__(self, role):
+        super().__init__(timeout=None)
+        self.role = role
+
+    @discord.ui.button(label='🎭 ロールを取得', style=discord.ButtonStyle.primary, emoji='🎭')
+    async def get_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        user_id = str(interaction.user.id)
+
+        # Add user to database if not exists
+        if user_id not in data['users']:
+            data['users'][user_id] = {
+                'coins': 100,
+                'authenticated': True,
+                'join_date': datetime.now().isoformat()
+            }
         else:
-            await interaction.response.send_message('✅ 認証が完了しました！（ロールが見つかりませんでした）', ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message('✅ 認証が完了しましたが、ロールの付与に失敗しました。', ephemeral=True)
+            data['users'][user_id]['authenticated'] = True
+
+        save_data(data)
+
+        try:
+            # Check if user already has the role
+            if self.role in interaction.user.roles:
+                await interaction.response.send_message(f'❌ あなたは既に {self.role.name} ロールを持っています。', ephemeral=True)
+                return
+
+            # Add the role to the user
+            await interaction.user.add_roles(self.role)
+            await interaction.response.send_message(f'✅ {self.role.name} ロールが付与されました！', ephemeral=True)
+            
+        except discord.Forbidden:
+            await interaction.response.send_message('❌ ロールを付与する権限がありません。', ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f'❌ ロールの付与に失敗しました: {str(e)}', ephemeral=True)
+
+# Public Auth View
+class PublicAuthView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='🎭 認証する', style=discord.ButtonStyle.primary, emoji='🎭')
+    async def authenticate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        user_id = str(interaction.user.id)
+
+        # Add user to database if not exists
+        if user_id not in data['users']:
+            data['users'][user_id] = {
+                'coins': 100,
+                'authenticated': True,
+                'join_date': datetime.now().isoformat()
+            }
+        else:
+            data['users'][user_id]['authenticated'] = True
+
+        save_data(data)
+
+        # Get assignable roles (exclude @everyone, bot roles, and admin roles)
+        assignable_roles = []
+        for role in interaction.guild.roles:
+            if (role.name != '@everyone' and 
+                not role.managed and 
+                not role.permissions.administrator and
+                role < interaction.guild.me.top_role):
+                assignable_roles.append(role)
+
+        if not assignable_roles:
+            await interaction.response.send_message('❌ 付与可能なロールがありません。', ephemeral=True)
+            return
+
+        # Create embed for role selection
+        embed = discord.Embed(
+            title='🎭 ロール選択',
+            description='取得したいロールを下のボタンから選択してください。\n\n**利用可能なロール:**',
+            color=0x00ff99
+        )
+
+        # Add role information to embed
+        role_list = []
+        for role in assignable_roles[:10]:  # Show max 10 roles in embed
+            role_list.append(f'• {role.name} ({len(role.members)} メンバー)')
+        
+        embed.add_field(
+            name='📋 ロール一覧',
+            value='\n'.join(role_list) + ('...' if len(assignable_roles) > 10 else ''),
+            inline=False
+        )
+
+        embed.set_footer(text='ボタンをクリックしてロールを取得')
+
+        # Create view with role buttons
+        view = RoleSelectionView(assignable_roles)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# Authentication command
+@bot.tree.command(name='auth', description='認証ボタンパネルを設置またはロールを直接取得')
+async def auth(interaction: discord.Interaction, role_name: str = None):
+    # If specific role name is provided, directly assign it
+    if role_name:
+        data = load_data()
+        user_id = str(interaction.user.id)
+
+        # Add user to database if not exists
+        if user_id not in data['users']:
+            data['users'][user_id] = {
+                'coins': 100,
+                'authenticated': True,
+                'join_date': datetime.now().isoformat()
+            }
+        else:
+            data['users'][user_id]['authenticated'] = True
+
+        save_data(data)
+
+        try:
+            role = discord.utils.get(interaction.guild.roles, name=role_name)
+            if role:
+                if role in interaction.user.roles:
+                    await interaction.response.send_message(f'❌ あなたは既に {role.name} ロールを持っています。', ephemeral=True)
+                    return
+                
+                await interaction.user.add_roles(role)
+                await interaction.response.send_message(f'✅ 認証が完了しました！{role.name} ロールが付与されました。', ephemeral=True)
+            else:
+                await interaction.response.send_message(f'❌ "{role_name}" ロールが見つかりません。', ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f'❌ ロールの付与に失敗しました: {str(e)}', ephemeral=True)
+        return
+
+    # If no role name provided, create auth panel
+    embed = discord.Embed(
+        title='🎭 認証システム',
+        description='下のボタンをクリックして認証を行い、ロールを取得してください。\n\n'
+                   '**認証について:**\n'
+                   '• 初回認証時に100コインを獲得できます\n'
+                   '• ボットの全機能を利用できるようになります\n'
+                   '• 利用可能なロールから選択できます',
+        color=0x00ff99
+    )
+    embed.set_footer(text='認証は無料です')
+
+    view = PublicAuthView()
+    await interaction.response.send_message(embed=embed, view=view)
 
 # Vending Machine View with buttons
 class VendingMachineView(discord.ui.View):
@@ -91,7 +263,7 @@ class VendingMachineView(discord.ui.View):
         super().__init__(timeout=300)
         self.guild_id = guild_id
         self.setup_buttons()
-    
+
     def setup_buttons(self):
         data = load_data()
         if self.guild_id in data['vending_machines']:
@@ -105,44 +277,44 @@ class VendingMachineView(discord.ui.View):
                 )
                 button.callback = self.create_buy_callback(item_id)
                 self.add_item(button)
-    
+
     def create_buy_callback(self, item_id):
         async def buy_callback(interaction):
             await self.buy_item(interaction, item_id)
         return buy_callback
-    
+
     async def buy_item(self, interaction, item_id):
         data = load_data()
         guild_id = str(interaction.guild.id)
         user_id = str(interaction.user.id)
-        
+
         # Check if user exists
         if user_id not in data['users']:
             await interaction.response.send_message('❌ 先に /auth で認証してください。', ephemeral=True)
             return
-        
+
         # Check if item exists
         if guild_id not in data['vending_machines'] or item_id not in data['vending_machines'][guild_id]['items']:
             await interaction.response.send_message('❌ アイテムが見つかりません。', ephemeral=True)
             return
-        
+
         item = data['vending_machines'][guild_id]['items'][item_id]
         user = data['users'][user_id]
-        
+
         # Check stock
         if item['stock'] <= 0:
             await interaction.response.send_message('❌ 在庫がありません。', ephemeral=True)
             return
-        
+
         # Check coins
         if user['coins'] < item['price']:
             await interaction.response.send_message(f'❌ コインが不足しています。必要: {item["price"]}、所持: {user["coins"]}', ephemeral=True)
             return
-        
+
         # Process purchase
         user['coins'] -= item['price']
         item['stock'] -= 1
-        
+
         # Record transaction
         transaction = {
             'user_id': user_id,
@@ -152,16 +324,16 @@ class VendingMachineView(discord.ui.View):
             'guild_id': guild_id
         }
         data['transactions'].append(transaction)
-        
+
         save_data(data)
-        
+
         # Update the view with new button states
         new_view = VendingMachineView(guild_id)
-        
+
         # Create updated embed
         vending_machine = data['vending_machines'][guild_id]
         embed = discord.Embed(title='🏪 自動販売機', color=0x00ff00)
-        
+
         if not vending_machine['items']:
             embed.description = '商品がありません。'
         else:
@@ -171,7 +343,7 @@ class VendingMachineView(discord.ui.View):
                     value=f"在庫: {item_display['stock']}個\nID: {item_id_display}",
                     inline=True
                 )
-        
+
         await interaction.response.edit_message(embed=embed, view=new_view)
         await interaction.followup.send(f'✅ {item["name"]} を購入しました！残りコイン: {user["coins"]}', ephemeral=True)
 
@@ -180,16 +352,16 @@ class VendingMachineView(discord.ui.View):
 async def show_vending_machine(interaction: discord.Interaction):
     data = load_data()
     guild_id = str(interaction.guild.id)
-    
+
     if guild_id not in data['vending_machines']:
         data['vending_machines'][guild_id] = {
             'items': {},
             'created_at': datetime.now().isoformat()
         }
         save_data(data)
-    
+
     vending_machine = data['vending_machines'][guild_id]
-    
+
     if not vending_machine['items']:
         embed = discord.Embed(title='🏪 自動販売機', description='商品がありません。', color=0x00ff00)
         await interaction.response.send_message(embed=embed)
@@ -201,7 +373,7 @@ async def show_vending_machine(interaction: discord.Interaction):
                 value=f"在庫: {item['stock']}個\nID: {item_id}",
                 inline=True
             )
-        
+
         view = VendingMachineView(guild_id)
         await interaction.response.send_message(embed=embed, view=view)
 
@@ -210,10 +382,10 @@ async def show_vending_machine(interaction: discord.Interaction):
 async def new_item(interaction: discord.Interaction, name: str, price: int, stock: int = 1):
     data = load_data()
     guild_id = str(interaction.guild.id)
-    
+
     if guild_id not in data['vending_machines']:
         data['vending_machines'][guild_id] = {'items': {}}
-    
+
     item_id = str(len(data['vending_machines'][guild_id]['items']) + 1)
     data['vending_machines'][guild_id]['items'][item_id] = {
         'name': name,
@@ -221,7 +393,7 @@ async def new_item(interaction: discord.Interaction, name: str, price: int, stoc
         'stock': stock,
         'created_by': str(interaction.user.id)
     }
-    
+
     save_data(data)
     await interaction.response.send_message(f'✅ アイテム "{name}" を追加しました！（ID: {item_id}）')
 
@@ -230,13 +402,13 @@ async def new_item(interaction: discord.Interaction, name: str, price: int, stoc
 async def add_coins(interaction: discord.Interaction, user: discord.Member, amount: int):
     data = load_data()
     user_id = str(user.id)
-    
+
     if user_id not in data['users']:
         data['users'][user_id] = {'coins': 0, 'authenticated': False}
-    
+
     data['users'][user_id]['coins'] += amount
     save_data(data)
-    
+
     await interaction.response.send_message(f'✅ {user.display_name} に {amount} コインを追加しました！')
 
 # Delete item from vending machine
@@ -244,7 +416,7 @@ async def add_coins(interaction: discord.Interaction, user: discord.Member, amou
 async def delete_item(interaction: discord.Interaction, item_id: str):
     data = load_data()
     guild_id = str(interaction.guild.id)
-    
+
     if guild_id in data['vending_machines'] and item_id in data['vending_machines'][guild_id]['items']:
         item_name = data['vending_machines'][guild_id]['items'][item_id]['name']
         del data['vending_machines'][guild_id]['items'][item_id]
@@ -258,7 +430,7 @@ async def delete_item(interaction: discord.Interaction, item_id: str):
 async def change_price(interaction: discord.Interaction, item_id: str, new_price: int):
     data = load_data()
     guild_id = str(interaction.guild.id)
-    
+
     if guild_id in data['vending_machines'] and item_id in data['vending_machines'][guild_id]['items']:
         old_price = data['vending_machines'][guild_id]['items'][item_id]['price']
         data['vending_machines'][guild_id]['items'][item_id]['price'] = new_price
@@ -272,7 +444,7 @@ async def change_price(interaction: discord.Interaction, item_id: str, new_price
 async def add_stock(interaction: discord.Interaction, item_id: str, amount: int):
     data = load_data()
     guild_id = str(interaction.guild.id)
-    
+
     if guild_id in data['vending_machines'] and item_id in data['vending_machines'][guild_id]['items']:
         data['vending_machines'][guild_id]['items'][item_id]['stock'] += amount
         save_data(data)
@@ -286,34 +458,34 @@ async def buy_item(interaction: discord.Interaction, item_id: str):
     data = load_data()
     guild_id = str(interaction.guild.id)
     user_id = str(interaction.user.id)
-    
+
     # Check if user exists
     if user_id not in data['users']:
         await interaction.response.send_message('❌ 先に /auth で認証してください。')
         return
-    
+
     # Check if item exists
     if guild_id not in data['vending_machines'] or item_id not in data['vending_machines'][guild_id]['items']:
         await interaction.response.send_message('❌ アイテムが見つかりません。')
         return
-    
+
     item = data['vending_machines'][guild_id]['items'][item_id]
     user = data['users'][user_id]
-    
+
     # Check stock
     if item['stock'] <= 0:
         await interaction.response.send_message('❌ 在庫がありません。')
         return
-    
+
     # Check coins
     if user['coins'] < item['price']:
         await interaction.response.send_message(f'❌ コインが不足しています。必要: {item["price"]}、所持: {user["coins"]}')
         return
-    
+
     # Process purchase
     user['coins'] -= item['price']
     item['stock'] -= 1
-    
+
     # Record transaction
     transaction = {
         'user_id': user_id,
@@ -323,9 +495,9 @@ async def buy_item(interaction: discord.Interaction, item_id: str):
         'guild_id': guild_id
     }
     data['transactions'].append(transaction)
-    
+
     save_data(data)
-    
+
     await interaction.response.send_message(f'✅ {item["name"]} を購入しました！残りコイン: {user["coins"]}')
 
 # View transactions
@@ -333,22 +505,22 @@ async def buy_item(interaction: discord.Interaction, item_id: str):
 async def view_transactions(interaction: discord.Interaction):
     data = load_data()
     user_id = str(interaction.user.id)
-    
+
     user_transactions = [t for t in data['transactions'] if t['user_id'] == user_id]
-    
+
     if not user_transactions:
         await interaction.response.send_message('取引履歴がありません。')
         return
-    
+
     embed = discord.Embed(title='📊 取引履歴', color=0x0099ff)
-    
+
     for i, transaction in enumerate(user_transactions[-10:]):  # Show last 10 transactions
         embed.add_field(
             name=f"{i+1}. {transaction['item_name']}",
             value=f"価格: {transaction['price']}コイン\n日時: {transaction['timestamp'][:10]}",
             inline=True
         )
-    
+
     await interaction.response.send_message(embed=embed)
 
 # Ticket system
@@ -357,27 +529,27 @@ async def create_ticket(interaction: discord.Interaction, subject: str, descript
     data = load_data()
     user_id = str(interaction.user.id)
     ticket_id = str(len(data['tickets']) + 1)
-    
+
     # Create ticket channel
     guild = interaction.guild
     category = discord.utils.get(guild.categories, name="🎫 チケット")
-    
+
     # Create category if it doesn't exist
     if not category:
         category = await guild.create_category("🎫 チケット")
-    
+
     # Set permissions for the ticket channel
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
         interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
         guild.owner: discord.PermissionOverwrite(read_messages=True, send_messages=True)
     }
-    
+
     # Add permissions for users with Administrator permission
     for member in guild.members:
         if member.guild_permissions.administrator:
             overwrites[member] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    
+
     # Create the ticket channel
     channel_name = f"ticket-{ticket_id}-{interaction.user.name}"
     try:
@@ -386,7 +558,7 @@ async def create_ticket(interaction: discord.Interaction, subject: str, descript
             category=category,
             overwrites=overwrites
         )
-        
+
         data['tickets'][ticket_id] = {
             'user_id': user_id,
             'subject': subject,
@@ -396,9 +568,9 @@ async def create_ticket(interaction: discord.Interaction, subject: str, descript
             'guild_id': str(interaction.guild.id),
             'channel_id': str(ticket_channel.id)
         }
-        
+
         save_data(data)
-        
+
         # Send initial message to ticket channel
         embed = discord.Embed(
             title=f'🎫 チケット #{ticket_id}',
@@ -407,18 +579,18 @@ async def create_ticket(interaction: discord.Interaction, subject: str, descript
         )
         embed.add_field(name='ステータス', value='🟢 オープン', inline=True)
         embed.add_field(name='作成日時', value=f'<t:{int(datetime.now().timestamp())}:F>', inline=True)
-        
+
         # Add close button
         view = TicketView(ticket_id)
         await ticket_channel.send(embed=embed, view=view)
-        
+
         # Response to user
         await interaction.response.send_message(
             f'✅ チケット #{ticket_id} を作成しました！\n'
             f'専用チャンネル: {ticket_channel.mention}',
             ephemeral=True
         )
-        
+
     except Exception as e:
         await interaction.response.send_message(f'❌ チケットチャンネルの作成に失敗しました: {str(e)}', ephemeral=True)
 
@@ -427,29 +599,29 @@ class TicketView(discord.ui.View):
     def __init__(self, ticket_id):
         super().__init__(timeout=None)
         self.ticket_id = ticket_id
-    
+
     @discord.ui.button(label='チケットを閉じる', style=discord.ButtonStyle.danger, emoji='🔒')
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = load_data()
-        
+
         if self.ticket_id not in data['tickets']:
             await interaction.response.send_message('❌ チケットが見つかりません。', ephemeral=True)
             return
-        
+
         ticket = data['tickets'][self.ticket_id]
         user_id = str(interaction.user.id)
-        
+
         # Check if user can close the ticket (creator or admin)
         if user_id != ticket['user_id'] and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message('❌ このチケットを閉じる権限がありません。', ephemeral=True)
             return
-        
+
         # Update ticket status
         data['tickets'][self.ticket_id]['status'] = 'closed'
         data['tickets'][self.ticket_id]['closed_at'] = datetime.now().isoformat()
         data['tickets'][self.ticket_id]['closed_by'] = user_id
         save_data(data)
-        
+
         # Update embed
         embed = discord.Embed(
             title=f'🎫 チケット #{self.ticket_id} (クローズ済み)',
@@ -459,12 +631,12 @@ class TicketView(discord.ui.View):
         embed.add_field(name='ステータス', value='🔴 クローズ済み', inline=True)
         embed.add_field(name='クローズ日時', value=f'<t:{int(datetime.now().timestamp())}:F>', inline=True)
         embed.add_field(name='クローズ実行者', value=interaction.user.mention, inline=True)
-        
+
         # Disable button
         button.disabled = True
-        
+
         await interaction.response.edit_message(embed=embed, view=self)
-        
+
         # Send confirmation message
         await interaction.followup.send('🔒 チケットがクローズされました。')
 
@@ -473,26 +645,26 @@ class TicketView(discord.ui.View):
 async def list_tickets(interaction: discord.Interaction):
     data = load_data()
     guild_id = str(interaction.guild.id)
-    
+
     guild_tickets = {k: v for k, v in data['tickets'].items() if v['guild_id'] == guild_id}
-    
+
     if not guild_tickets:
         await interaction.response.send_message('チケットがありません。', ephemeral=True)
         return
-    
+
     embed = discord.Embed(title='🎫 チケット一覧', color=0x0099ff)
-    
+
     for ticket_id, ticket in guild_tickets.items():
         status_emoji = '🟢' if ticket['status'] == 'open' else '🔴'
         creator = interaction.guild.get_member(int(ticket['user_id']))
         creator_name = creator.display_name if creator else 'Unknown User'
-        
+
         embed.add_field(
             name=f"{status_emoji} チケット #{ticket_id}",
             value=f"**件名:** {ticket['subject']}\n**作成者:** {creator_name}\n**ステータス:** {ticket['status']}",
             inline=True
         )
-    
+
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Nuke channel
@@ -501,15 +673,15 @@ async def nuke_channel(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.manage_channels:
         await interaction.response.send_message('❌ チャンネル管理権限が必要です。')
         return
-    
+
     channel = interaction.channel
-    
+
     # Store channel settings
     channel_name = channel.name
     channel_topic = channel.topic
     channel_category = channel.category
     channel_position = channel.position
-    
+
     # Create new channel with same settings
     new_channel = await channel.guild.create_text_channel(
         name=channel_name,
@@ -517,10 +689,10 @@ async def nuke_channel(interaction: discord.Interaction):
         category=channel_category,
         position=channel_position
     )
-    
+
     # Delete old channel
     await channel.delete()
-    
+
     # Send confirmation in new channel
     embed = discord.Embed(
         title='💥 チャンネルがヌークされました！',
@@ -534,17 +706,17 @@ async def nuke_channel(interaction: discord.Interaction):
 async def view_profile(interaction: discord.Interaction, user: discord.Member = None):
     if user is None:
         user = interaction.user
-    
+
     data = load_data()
     user_id = str(user.id)
-    
+
     if user_id not in data['users']:
         await interaction.response.send_message('❌ ユーザーが見つかりません。')
         return
-    
+
     user_data = data['users'][user_id]
     user_transactions = [t for t in data['transactions'] if t['user_id'] == user_id]
-    
+
     embed = discord.Embed(
         title=f'👤 {user.display_name} のプロフィール',
         color=0x00ff00
@@ -552,14 +724,14 @@ async def view_profile(interaction: discord.Interaction, user: discord.Member = 
     embed.add_field(name='💰 コイン', value=str(user_data['coins']), inline=True)
     embed.add_field(name='🛒 購入回数', value=str(len(user_transactions)), inline=True)
     embed.add_field(name='✅ 認証状態', value='認証済み' if user_data.get('authenticated') else '未認証', inline=True)
-    
+
     await interaction.response.send_message(embed=embed)
 
 # Public Ticket Creation View
 class PublicTicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-    
+
     @discord.ui.button(label='🎫 チケットを作成', style=discord.ButtonStyle.primary, emoji='🎫')
     async def create_ticket_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Show modal for ticket creation
@@ -570,14 +742,14 @@ class PublicTicketView(discord.ui.View):
 class TicketModal(discord.ui.Modal, title='🎫 チケット作成'):
     def __init__(self):
         super().__init__()
-    
+
     subject = discord.ui.TextInput(
         label='件名',
         placeholder='チケットの件名を入力してください...',
         required=True,
         max_length=100
     )
-    
+
     description = discord.ui.TextInput(
         label='説明',
         placeholder='問題の詳細を入力してください...',
@@ -585,32 +757,32 @@ class TicketModal(discord.ui.Modal, title='🎫 チケット作成'):
         required=False,
         max_length=1000
     )
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         data = load_data()
         user_id = str(interaction.user.id)
         ticket_id = str(len(data['tickets']) + 1)
-        
+
         # Create ticket channel
         guild = interaction.guild
         category = discord.utils.get(guild.categories, name="🎫 チケット")
-        
+
         # Create category if it doesn't exist
         if not category:
             category = await guild.create_category("🎫 チケット")
-        
+
         # Set permissions for the ticket channel
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
             guild.owner: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
-        
+
         # Add permissions for users with Administrator permission
         for member in guild.members:
             if member.guild_permissions.administrator:
                 overwrites[member] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        
+
         # Create the ticket channel
         channel_name = f"ticket-{ticket_id}-{interaction.user.name}"
         try:
@@ -619,7 +791,7 @@ class TicketModal(discord.ui.Modal, title='🎫 チケット作成'):
                 category=category,
                 overwrites=overwrites
             )
-            
+
             data['tickets'][ticket_id] = {
                 'user_id': user_id,
                 'subject': str(self.subject.value),
@@ -629,9 +801,9 @@ class TicketModal(discord.ui.Modal, title='🎫 チケット作成'):
                 'guild_id': str(interaction.guild.id),
                 'channel_id': str(ticket_channel.id)
             }
-            
+
             save_data(data)
-            
+
             # Send initial message to ticket channel
             embed = discord.Embed(
                 title=f'🎫 チケット #{ticket_id}',
@@ -640,18 +812,18 @@ class TicketModal(discord.ui.Modal, title='🎫 チケット作成'):
             )
             embed.add_field(name='ステータス', value='🟢 オープン', inline=True)
             embed.add_field(name='作成日時', value=f'<t:{int(datetime.now().timestamp())}:F>', inline=True)
-            
+
             # Add close button
             view = TicketView(ticket_id)
             await ticket_channel.send(embed=embed, view=view)
-            
+
             # Response to user
             await interaction.response.send_message(
                 f'✅ チケット #{ticket_id} を作成しました！\n'
                 f'専用チャンネル: {ticket_channel.mention}',
                 ephemeral=True
             )
-            
+
         except Exception as e:
             await interaction.response.send_message(f'❌ チケットチャンネルの作成に失敗しました: {str(e)}', ephemeral=True)
 
@@ -661,7 +833,7 @@ async def ticket_panel(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.manage_channels:
         await interaction.response.send_message('❌ チャンネル管理権限が必要です。', ephemeral=True)
         return
-    
+
     embed = discord.Embed(
         title='🎫 サポートチケット',
         description='何かお困りのことがありましたら、下のボタンをクリックしてサポートチケットを作成してください。\n\n'
@@ -672,16 +844,116 @@ async def ticket_panel(interaction: discord.Interaction):
         color=0x00ff99
     )
     embed.set_footer(text='24時間365日サポート対応')
-    
+
     view = PublicTicketView()
     await interaction.response.send_message(embed=embed, view=view)
+
+# Setup role panel command
+@bot.tree.command(name='setuprole', description='ロール取得パネルを設置')
+async def setup_role(interaction: discord.Interaction, role_name: str = None):
+    if not interaction.user.guild_permissions.manage_roles:
+        await interaction.response.send_message('❌ ロール管理権限が必要です。', ephemeral=True)
+        return
+
+    # If specific role name is provided, create a panel for that specific role
+    if role_name:
+        role = discord.utils.get(interaction.guild.roles, name=role_name)
+        if not role:
+            await interaction.response.send_message(f'❌ "{role_name}" ロールが見つかりません。', ephemeral=True)
+            return
+        
+        # Check if the role can be assigned
+        if (role.name == '@everyone' or 
+            role.managed or 
+            role.permissions.administrator or
+            role >= interaction.guild.me.top_role):
+            await interaction.response.send_message(f'❌ "{role_name}" ロールは付与できません。', ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title='🎭 ロール取得システム',
+            description=f'下のボタンをクリックして **{role_name}** ロールを取得してください。\n\n'
+                       '**認証について:**\n'
+                       '• 初回認証時に100コインを獲得できます\n'
+                       '• ボットの全機能を利用できるようになります\n'
+                       '• 誰でも自由に使用できます',
+            color=0x00ff99
+        )
+        embed.add_field(
+            name='📋 取得可能なロール',
+            value=f'• {role_name} ({len(role.members)} メンバー)',
+            inline=False
+        )
+        embed.set_footer(text='認証は無料です | 24時間利用可能')
+
+        view = SpecificRoleView(role)
+        await interaction.response.send_message(embed=embed, view=view)
+    else:
+        # Original behavior - show all available roles
+        embed = discord.Embed(
+            title='🎭 ロール取得システム',
+            description='下のボタンをクリックして認証を行い、ロールを取得してください。\n\n'
+                       '**認証について:**\n'
+                       '• 初回認証時に100コインを獲得できます\n'
+                       '• ボットの全機能を利用できるようになります\n'
+                       '• 利用可能なロールから選択できます\n'
+                       '• 誰でも自由に使用できます',
+            color=0x00ff99
+        )
+        embed.set_footer(text='認証は無料です | 24時間利用可能')
+
+        view = PublicAuthView()
+        await interaction.response.send_message(embed=embed, view=view)
+
+# View user's servers
+@bot.tree.command(name='servers', description='ユーザーが参加しているサーバー一覧を表示')
+async def view_servers(interaction: discord.Interaction, user: discord.Member = None):
+    if user is None:
+        user = interaction.user
+
+    # Get all mutual guilds between the bot and the user
+    mutual_guilds = user.mutual_guilds
+
+    if not mutual_guilds:
+        await interaction.response.send_message(f'❌ {user.display_name} との共通サーバーが見つかりません。')
+        return
+
+    embed = discord.Embed(
+        title=f'🌐 {user.display_name} が参加しているサーバー',
+        description=f'Botと共通のサーバー: {len(mutual_guilds)}個',
+        color=0x0099ff
+    )
+
+    for guild in mutual_guilds:
+        # Get member object for this guild
+        member = guild.get_member(user.id)
+        if member:
+            # Get join date
+            joined_at = member.joined_at
+            join_date = joined_at.strftime('%Y/%m/%d') if joined_at else '不明'
+            
+            # Get member count
+            member_count = guild.member_count
+            
+            # Get user's roles in this guild (excluding @everyone)
+            roles = [role.name for role in member.roles if role.name != '@everyone']
+            roles_text = ', '.join(roles[:3]) + ('...' if len(roles) > 3 else '') if roles else 'なし'
+            
+            embed.add_field(
+                name=f'📋 {guild.name}',
+                value=f'**メンバー数:** {member_count}\n**参加日:** {join_date}\n**ロール:** {roles_text}',
+                inline=True
+            )
+
+    embed.set_footer(text=f'総サーバー数: {len(mutual_guilds)}')
+    await interaction.response.send_message(embed=embed)
 
 # Help system
 COMMAND_HELP = {
     'auth': {
         'description': '認証してロールを取得',
-        'usage': '/auth',
-        'details': 'このコマンドを使用してボットに認証し、初期コイン(100枚)を受け取ります。また、"認証済み"ロールが付与されます。'
+        'usage': '/auth [ロール名]',
+        'details': 'このコマンドを使用してボットに認証し、初期コイン(100枚)を受け取ります。ロール名を指定するとそのロールが付与され、省略するとインタラクションボタンでロールを選択できます。'
     },
     'show': {
         'description': '自動販売機を表示',
@@ -752,6 +1024,16 @@ COMMAND_HELP = {
         'description': 'チケット作成パネルを設置',
         'usage': '/ticket-panel',
         'details': '誰でもボタンをクリックしてチケットを作成できるパネルを設置します。チャンネル管理権限が必要です。'
+    },
+    'servers': {
+        'description': 'ユーザーが参加しているサーバー一覧を表示',
+        'usage': '/servers [ユーザー]',
+        'details': '指定したユーザー（省略時は自分）が参加している共通サーバーの一覧を表示します。各サーバーのメンバー数、参加日、ロール情報も含まれます。'
+    },
+    'setuprole': {
+        'description': 'ロール取得パネルを設置',
+        'usage': '/setuprole [ロール名]',
+        'details': '誰でもボタンをクリックしてロールを取得できるパネルを設置します。ロール名を指定すると特定のロール専用パネルが作成され、省略すると全ロール選択パネルが作成されます。ロール管理権限が必要です。'
     }
 }
 
@@ -764,17 +1046,17 @@ async def help_command(interaction: discord.Interaction, command: str = None):
             description='使用可能なコマンドの一覧です。詳細は `/help コマンド名` で確認できます。',
             color=0x0099ff
         )
-        
+
         for cmd_name, cmd_info in COMMAND_HELP.items():
             embed.add_field(
                 name=f"/{cmd_name}",
                 value=cmd_info['description'],
                 inline=False
             )
-        
+
         embed.set_footer(text="例: /help auth - authコマンドの詳細を表示")
         await interaction.response.send_message(embed=embed)
-    
+
     else:
         # Show specific command help
         if command in COMMAND_HELP:
@@ -786,7 +1068,7 @@ async def help_command(interaction: discord.Interaction, command: str = None):
             embed.add_field(name='説明', value=cmd_info['description'], inline=False)
             embed.add_field(name='使用方法', value=f"`{cmd_info['usage']}`", inline=False)
             embed.add_field(name='詳細', value=cmd_info['details'], inline=False)
-            
+
             await interaction.response.send_message(embed=embed)
         else:
             available_commands = ', '.join(COMMAND_HELP.keys())
@@ -801,7 +1083,7 @@ def run_bot():
     if not token:
         print('DISCORD_TOKEN環境変数が設定されていません。')
         return
-    
+
     print("Starting Discord bot...")
     bot.run(token)
 
@@ -812,6 +1094,6 @@ if __name__ == '__main__':
     flask_thread.daemon = True
     flask_thread.start()
     print("Flask server started on port 5000")
-    
+
     # Start Discord bot
     run_bot()
